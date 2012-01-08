@@ -55,10 +55,11 @@ SCRIPTNAME=`basename $0`
 # some systems, eg. Darwin & FreeBSD, prune /var/run on boot
 if [ ! -d "/var/run/vpnc" ]; then
 	mkdir -p /var/run/vpnc
+	[ -x /sbin/restorecon ] && /sbin/restorecon /var/run/vpnc
 fi
 
 # stupid SunOS: no blubber in /usr/local/bin ... (on stdout)
-IPROUTE="`which ip | grep '^/' 2> /dev/null`"
+IPROUTE="`which ip | grep '^/'`" 2> /dev/null
 
 if [ "$OS" = "Linux" ]; then
 	ifconfig_syntax_ptp="pointopoint"
@@ -72,11 +73,11 @@ else
 	route_syntax_netmask="-netmask"
 fi
 if [ "$OS" = "SunOS" ]; then
-    route_syntax_interface="-interface"
-    route_syntax_plumb="plumb"
+	route_syntax_interface="-interface"
+	ifconfig_syntax_ptpv6="$INTERNAL_IP6_ADDRESS"
 else
-    route_syntax_interface=""
-    route_syntax_plumb=""
+	route_syntax_interface=""
+	ifconfig_syntax_ptpv6=""
 fi
 
 if [ -x /sbin/resolvconf ]; then # Optional tool on Debian, Ubuntu, Gentoo
@@ -96,28 +97,44 @@ do_ifconfig() {
 	if [ -n "$INTERNAL_IP4_MTU" ]; then
 		MTU=$INTERNAL_IP4_MTU
 	elif [ -n "$IPROUTE" ]; then
-		MTU=$(($($IPROUTE route get "$VPNGATEWAY" | sed -ne 's/^.*mtu \([[:digit:]]\+\).*$/\1/p') - 88))
-	else
+		MTUDEV=$($IPROUTE route get "$VPNGATEWAY" | sed -ne 's/^.*dev \([a-z0-9]*\).*$/\1/p')
+		MTU=$($IPROUTE link show "$MTUDEV" | sed -ne 's/^.*mtu \([[:digit:]]\+\).*$/\1/p')
+		if [ -n "$MTU" ]; then
+			MTU=$(( $MTU - 88 ))
+		fi
+	fi
+
+	if [ -z "$MTU" ]; then
 		MTU=1412
 	fi
 
 	# Point to point interface require a netmask of 255.255.255.255 on some systems
-	ifconfig "$TUNDEV" inet "$INTERNAL_IP4_ADDRESS" $ifconfig_syntax_ptp "$INTERNAL_IP4_ADDRESS" netmask 255.255.255.255 mtu ${MTU} up
+	if [ -n "$IPROUTE" ]; then
+		$IPROUTE link set dev "$TUNDEV" up mtu "$MTU"
+		$IPROUTE addr add "$INTERNAL_IP4_ADDRESS/255.255.255.255" peer "$INTERNAL_IP4_ADDRESS" dev "$TUNDEV"
+	else
+		ifconfig "$TUNDEV" inet "$INTERNAL_IP4_ADDRESS" $ifconfig_syntax_ptp "$INTERNAL_IP4_ADDRESS" netmask 255.255.255.255 mtu ${MTU} up
+	fi
 
 	if [ -n "$INTERNAL_IP4_NETMASK" ]; then
 		set_network_route $INTERNAL_IP4_NETADDR $INTERNAL_IP4_NETMASK $INTERNAL_IP4_NETMASKLEN
 	fi
 
 	# If the netmask is provided, it contains the address _and_ netmask
-	if [ -n "$IPROUTE" ]; then
-	    if [ -n "$INTERNAL_IP6_NETMASK" ]; then
+	if [ -n "$INTERNAL_IP6_ADDRESS" ] && [ -z "$INTERNAL_IP6_NETMASK" ]; then
+	    INTERNAL_IP6_NETMASK="$INTERNAL_IP6_ADDRESS/128"
+	fi
+	if [ -n "$INTERNAL_IP6_NETMASK" ]; then
+	    if [ -n "$IPROUTE" ]; then
 		$IPROUTE -6 addr add $INTERNAL_IP6_NETMASK dev $TUNDEV
-	    elif [ -n "$INTERNAL_IP6_ADDRESS" ]; then
-		$IPROUTE -6 addr add $INTERNAL_IP6_ADDRESS/128 dev $TUNDEV
-	    fi
-	else
-	    if [ -n "$INTERNAL_IP6_ADDRESS" ]; then
-	        ifconfig "$TUNDEV" inet6 $route_syntax_plumb $INTERNAL_IP6_ADDRESS/128 $ifconfig_syntax_ptp $INTERNAL_IP6_ADDRESS mtu $MTU up
+	    else
+		# Unlike for Legacy IP, we don't specify the dest_address
+		# here on *BSD. OpenBSD for one will refuse to accept
+		# incoming packets to that address if we do.
+		# OpenVPN does the same (gives dest_address for Legacy IP
+		# but not for IPv6).
+		# Only Solaris needs it; hence $ifconfig_syntax_ptpv6
+	        ifconfig "$TUNDEV" inet6 $INTERNAL_IP6_NETMASK $ifconfig_syntax_ptpv6 mtu $MTU up
 	    fi
 	fi
 }
@@ -127,11 +144,6 @@ destroy_tun_device() {
 	NetBSD|FreeBSD) # and probably others...
 		ifconfig "$TUNDEV" destroy
 		;;
-        SunOS)
-		if [ -n "$INTERNAL_IP6_ADDRESS" ]; then
-		    ifconfig "$TUNDEV" inet6 unplumb
-		fi
-		;;
 	esac
 }
 
@@ -139,7 +151,8 @@ destroy_tun_device() {
 
 if [ -n "$IPROUTE" ]; then
 	fix_ip_get_output () {
-		sed 's/cache//;s/metric \?[0-9]\+ [0-9]\+//g;s/hoplimit [0-9]\+//g'
+		sed -e 's/ /\n/g' | \
+		    sed -ne '1p;/via/{N;p};/dev/{N;p};/src/{N;p};/mtu/{N;p}'
 	}
 
 	set_vpngateway_route() {
@@ -428,7 +441,7 @@ modify_resolvconf_suse()
 	RESOLV_OPTS=''
 	test -n "$INTERNAL_IP4_DNS" && RESOLV_OPTS="-n \"$INTERNAL_IP4_DNS\""
 	test -n "$CISCO_DEF_DOMAIN" && RESOLV_OPTS="$RESOLV_OPTS -d $CISCO_DEF_DOMAIN"
-	test -n "$RESOLV_OPTS" && eval /sbin/modify_resolvconf modify -s $SCRIPTNAME -p $SCRIPTNAME -f $FULL_SCRIPTNAME -e $TUNDEV $RESOLV_OPTS -t \"This file was created by $SCRIPTNAME\"
+	test -n "$RESOLV_OPTS" && eval /sbin/modify_resolvconf modify -s vpnc -p $SCRIPTNAME -f $FULL_SCRIPTNAME -e $TUNDEV $RESOLV_OPTS -t \"This file was created by $SCRIPTNAME\"
 }
 
 # Restore resolv.conf to old contents on Suse
@@ -485,6 +498,7 @@ do_pre_init() {
 			if [ ! -e /dev/net/tun ]; then
 				mkdir -p /dev/net
 				mknod -m 0640 /dev/net/tun c 10 200
+				[ -x /sbin/restorecon ] && /sbin/restorecon /dev/net/tun
 			fi
 			# workaround for a possible latency caused by udev, sleep max. 10s
 			if kernel_is_2_6_or_above ; then
