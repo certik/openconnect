@@ -3,7 +3,7 @@
 set -e
 
 # Install prerequisites:
-# apt-get install autoconf libtool libxml2-dev
+# apt-get install autoconf libtool libxml2-dev vpnc
 ./autogen.sh
-./configure
+./configure --with-vpnc-script=/etc/vpnc/vpnc-script
 make
