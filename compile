@@ -2,6 +2,8 @@
 
 set -e
 
+# Install prerequisites:
+# apt-get install autoconf libtool libxml2-dev
 ./autogen.sh
 ./configure
 make
