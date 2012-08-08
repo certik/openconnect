@@ -11,4 +11,4 @@ if [ "$1" = "" ]; then
     exit 1
 fi
 
-sudo ./openconnect --script ./vpnc-script --authgroup=llnl-vpnb -u $1 vpn.llnl.gov
+sudo ./openconnect --authgroup=llnl-vpnb -u $1 vpn.llnl.gov
